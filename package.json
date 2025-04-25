@@ -1,0 +1,36 @@
+{
+  "name": "@lambdapay/onchain",
+  "version": "1.0.0",
+  "description": "LambdaPay (🪜,💰) onchain smart contracts",
+  "files": [
+    "contracts/**/*.sol",
+    "out/**/*.json",
+    "!out/test/**/*"
+  ],
+  "scripts": {
+    "build": "forge build",
+    "test": "forge test",
+    "prepublishOnly": "forge build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/lambdapay/onchain.git"
+  },
+  "keywords": [
+    "ethereum",
+    "smart-contracts",
+    "solidity",
+    "lambdapay",
+    "permit2",
+    "uniswap",
+    "erc7597",
+    "erc2612",
+    "erc20"
+  ],
+  "author": "LambdaPay",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/lambdapay/onchain/issues"
+  },
+  "homepage": "https://github.com/lambdapay/onchain#readme"
+}

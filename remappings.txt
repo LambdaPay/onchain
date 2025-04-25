@@ -1,0 +1,6 @@
+ds-test/=lib/universal-router/solmate/lib/ds-test/src/
+forge-std/=lib/forge-std/src/
+solmate/=lib/universal-router/lib/solmate/
+@uniswap/universal-router/=lib/universal-router/
+@openzeppelin/=lib/openzeppelin-contracts/
+@lambdapay/onchain/contracts/=contracts/
