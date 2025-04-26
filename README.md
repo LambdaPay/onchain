@@ -41,7 +41,7 @@ The LambdaPay Protocol enables seamless and secure cryptocurrency payments betwe
 ## Key Benefits ✨
 
 - ✅ **Guaranteed Settlement:** Merchants receive the _exact_ amount requested, eliminating partial or incorrect payments.
-- 🔄 **Automatic Conversion:** Payers can use supported tokens (with Uniswap V3 liquidity), automatically converted to the merchant's desired currency. Protects merchants from slippage and volatility during the transaction.
+- 🔄 **Automatic Conversion:** Payers can use supported tokens (with Uniswap V3 liquidity), which are automatically converted to the merchant's desired currency. The protocol ensures the merchant receives the **exact** required amount, shielding them from slippage and volatility during the transaction (the payer provides the necessary input amount, accounting for potential swap slippage).
 - 🛡️ **Error Prevention:** Operator-signed `TransferIntent`s prevent payments to wrong addresses or with incorrect amounts.
 - 🔐 **Secure Signatures:** Leverages EIP-712 typed structured data signatures for enhanced security and user experience in wallets.
 - ⛽ **Gas Efficiency (Optional):** Integrates with **Permit2 (0.8.20)** for ERC20 payments, allowing payers gasless token approvals in many scenarios.
@@ -62,6 +62,7 @@ The protocol consists of two primary parts:
 - Operators are backend services that facilitate payments.
 - They register their address and an optional separate fee destination address with the `LambdaPay` contract (`registerOperator` / `registerOperatorWithFeeDestination`). This registration is permissionless.
 - The Operator generates and signs the `TransferIntent` which authorizes a specific payment.
+- If the **payer's input token** supports the EIP-2612 `permit` standard, the Operator backend can facilitate a gas-subsidized payment. It collects the signed `TransferIntent`, prompts the user for an EIP-2612 `permit` signature (authorizing the LambdaPay contract to spend their tokens), bundles these into the `subsidizedTransferToken` transaction, and relays it to the network, paying the gas fees (which can be recovered via the `feeAmount`).
 
 ### Transfer Intents (`TransferIntent`)
 
@@ -71,18 +72,18 @@ The protocol consists of two primary parts:
 
 **`TransferIntent` Contents:**
 
-| Field               | Description                                                                          | Protected By |
-| :------------------ | :----------------------------------------------------------------------------------- | :----------- |
-| `recipientAmount`   | Exact amount of `recipientCurrency` the merchant must receive                        | Signature    |
-| `deadline`          | Unix timestamp after which the payment intent is invalid                             | Signature    |
-| `recipient`         | Merchant's wallet address                                                            | Signature    |
-| `recipientCurrency` | Token address (or `address(0)` for native currency) the merchant requires            | Signature    |
-| `refundDestination` | Address where unused funds (e.g., from swap overestimation) are returned             | Signature    |
-| `feeAmount`         | Amount of `recipientCurrency` the Operator will receive as a fee                     | Signature    |
-| `id`                | Unique identifier (`bytes16`) for this specific payment intent                       | Signature    |
-| `operator`          | Address of the registered Operator facilitating the payment                          | Signature    |
-| `signature`         | ECDSA signature from the `operator` over the EIP-712 hash of the intent fields       | N/A          |
-| `prefix`            | Optional signature prefix (e.g., `0x1901` for EIP-712, allows EIP-1271 via ERC-6492) | N/A          |
+| Field               | Description                                                                                                                                                   | Protected By |
+| :------------------ | :------------------------------------------------------------------------------------------------------------------------------------------------------------ | :----------- |
+| `recipientAmount`   | Exact amount of `recipientCurrency` the merchant must receive                                                                                                 | Signature    |
+| `deadline`          | Unix timestamp after which the payment intent is invalid                                                                                                      | Signature    |
+| `recipient`         | Merchant's wallet address                                                                                                                                     | Signature    |
+| `recipientCurrency` | Token address (or `address(0)` for native currency) the merchant requires                                                                                     | Signature    |
+| `refundDestination` | Address where unused funds (e.g., from swap overestimation) are returned                                                                                      | Signature    |
+| `feeAmount`         | Amount of `recipientCurrency` the Operator will receive as a fee                                                                                              | Signature    |
+| `id`                | Unique identifier (`bytes16`) for this specific payment intent                                                                                                | Signature    |
+| `operator`          | Address of the registered Operator facilitating the payment                                                                                                   | Signature    |
+| `signature`         | ECDSA signature from the `operator` over the EIP-712 hash of the intent fields                                                                                | N/A          |
+| `prefix`            | Optional signature prefix (e.g., `0x19` for EIP-191, `0x1901` for EIP-712). Allows validation of contract signatures (EIP-1271) using wrappers like ERC-6492. | N/A          |
 
 _(**Protected By:** Indicates fields whose integrity is guaranteed by the Operator's `signature`)_
 
@@ -127,6 +128,11 @@ sequenceDiagram
         else Wrapping (ETH → WETH)
             Payer UI->>+LambdaPay Contract: Call wrapAndTransfer() with Signed Intent & ETH value
         end
+    else Pay using EIP-2612 (Gas Subsidized)
+        Payer UI->>Payer UI: Sign EIP-2612 permit message allowing LambdaPay to transfer tokens
+        Payer UI->>Merchant Backend: Send Permit Signature + Intent Request Data
+        Merchant Backend->>Operator Backend: Send Permit Signature + Intent Request Data
+        Operator Backend->>+LambdaPay Contract: Call subsidizedTransferToken() with Signed Intent & Permit Data
     end
 
     LambdaPay Contract->>LambdaPay Contract: Verify Operator Signature (using EIP-712 data)
@@ -146,7 +152,7 @@ sequenceDiagram
     LambdaPay Contract->>Payer UI: Send Refund (if any overpayment/swap remainder) to refundDestination
     LambdaPay Contract->>LambdaPay Contract: Mark Intent ID as processed for this Operator
     LambdaPay Contract->>LambdaPay Contract: Emit Transferred Event
-    LambdaPay Contract-->>-Payer UI: Return transaction result
+    LambdaPay Contract-->>-Payer UI: Return transaction result (or to Operator if subsidized)
 
     Operator Backend->>Operator Backend: Monitor chain for Transferred Event
     Operator Backend->>Merchant Backend: Send Webhook Notification upon confirmation
@@ -164,27 +170,27 @@ For any transaction executing a valid, signed `TransferIntent`:
 - ☝️ **Single Use:** An intent `id` can only be successfully processed once per `operator`. Reverts if attempted again.
 - 💸 **Atomicity:** The entire payment (to merchant and operator fee), including any necessary swaps, succeeds or fails together. No partial states are possible.
 - 🔄 **Flexible Input:** Payers can initiate payments using native currency or ERC20 tokens. If the input currency differs from `recipientCurrency`, the contract handles the swap via Uniswap V3.
-- 🚫 **Output Fee-on-Transfer Resilience:** The contract includes checks (especially for swaps) to mitigate issues where the `recipientCurrency` might have transfer fees, aiming to ensure the merchant and operator receive the net `recipientAmount` and `feeAmount`. Direct transfers (`transferToken*`) assume standard ERC20 behavior for the output token.
+- 🚫 **Fee-on-Transfer Token Support:** The contract includes checks, particularly during swaps, to handle potential transfer fees charged by the `recipientCurrency` itself. This aims to ensure the merchant and operator receive the net `recipientAmount` and `feeAmount` respectively, even if the output token deducts a fee on transfer. Direct transfers (using `transferToken*` methods) assume the `recipientCurrency` behaves like a standard ERC20 token without transfer fees.
 - ⛓️ **Chain ID Protection:** EIP-712 signatures inherently include the Chain ID, preventing replay attacks on different chains.
 
 ---
 
 ## Contract Payment Methods ➡️
 
-The Payer UI must select the appropriate `LambdaPay.sol` function based on the `recipientCurrency` specified in the `TransferIntent` and the currency the payer wishes to use:
+The Payer UI (or Operator Backend for subsidized flows) must select the appropriate `LambdaPay.sol` function based on the `recipientCurrency` specified in the `TransferIntent` and the currency the payer wishes to use:
 
-| Method                                     | Merchant Wants (`recipientCurrency`) | Payer Pays With (`tokenIn` / `msg.value`) | Token Movement / Action                 | Requires Uniswap Swap? | Payer Approval Needed                         |
-| :----------------------------------------- | :----------------------------------- | :---------------------------------------- | :-------------------------------------- | :--------------------- | :-------------------------------------------- |
-| `transferNative`                           | Native (e.g., ETH)                   | Native (e.g., ETH)                        | `msg.value` used directly               | No                     | None (implicit via `msg.value`)               |
-| `transferToken`                            | ERC20                                | Same ERC20                                | `permit2.transferFrom`                  | No                     | **Permit2** signature for `tokenIn`           |
-| `transferTokenPreApproved`                 | ERC20                                | Same ERC20                                | `tokenIn.transferFrom`                  | No                     | Standard `approve` for `tokenIn` to LambdaPay |
-| `wrapAndTransfer`                          | WETH                                 | Native (e.g., ETH)                        | `msg.value` -> Wrap to WETH             | No                     | None (implicit via `msg.value`)               |
-| `unwrapAndTransfer`                        | Native (e.g., ETH)                   | WETH                                      | `permit2.transferFrom` (WETH) -> Unwrap | No                     | **Permit2** signature for WETH                |
-| `unwrapAndTransferPreApproved`             | Native (e.g., ETH)                   | WETH                                      | `WETH.transferFrom` -> Unwrap           | No                     | Standard `approve` for WETH to LambdaPay      |
-| `swapAndTransferUniswapV3Native`           | ERC20                                | Native (e.g., ETH)                        | `msg.value` -> Wrap -> Swap             | **Yes**                | None (implicit via `msg.value`)               |
-| `swapAndTransferUniswapV3Token`            | Native / ERC20                       | Different ERC20 (`tokenIn`)               | `permit2.transferFrom` -> Swap          | **Yes**                | **Permit2** signature for `tokenIn`           |
-| `swapAndTransferUniswapV3TokenPreApproved` | Native / ERC20                       | Different ERC20 (`tokenIn`)               | `tokenIn.transferFrom` -> Swap          | **Yes**                | Standard `approve` for `tokenIn` to LambdaPay |
-| `subsidizedTransferToken`                  | ERC20                                | Same ERC20                                | `tokenIn.permit` + `transferFrom`       | No                     | **EIP-2612 `permit`** signature for `tokenIn` |
+| Method                                     | Merchant Wants (`recipientCurrency`) | Payer Pays With (`tokenIn` / `msg.value`) | Action / Token Source                   | Requires Uniswap Swap? | Payer Approval Type                                                                           |
+| :----------------------------------------- | :----------------------------------- | :---------------------------------------- | :-------------------------------------- | :--------------------- | :-------------------------------------------------------------------------------------------- |
+| `transferNative`                           | Native (e.g., ETH)                   | Native (e.g., ETH)                        | `msg.value` used directly               | No                     | None (implicit via `msg.value`)                                                               |
+| `transferToken`                            | ERC20                                | Same ERC20                                | `permit2.transferFrom`                  | No                     | **Permit2** signature allowing LambdaPay to spend `tokenIn`                                   |
+| `transferTokenPreApproved`                 | ERC20                                | Same ERC20                                | `tokenIn.transferFrom`                  | No                     | Standard ERC20 `approve` allowing LambdaPay to spend `tokenIn`                                |
+| `wrapAndTransfer`                          | WETH                                 | Native (e.g., ETH)                        | `msg.value` -> Wrap to WETH             | No                     | None (implicit via `msg.value`)                                                               |
+| `unwrapAndTransfer`                        | Native (e.g., ETH)                   | WETH                                      | `permit2.transferFrom` (WETH) -> Unwrap | No                     | **Permit2** signature allowing LambdaPay to spend WETH                                        |
+| `unwrapAndTransferPreApproved`             | Native (e.g., ETH)                   | WETH                                      | `WETH.transferFrom` -> Unwrap           | No                     | Standard ERC20 `approve` allowing LambdaPay to spend WETH                                     |
+| `swapAndTransferUniswapV3Native`           | ERC20                                | Native (e.g., ETH)                        | `msg.value` -> Wrap -> Swap             | **Yes**                | None (implicit via `msg.value`)                                                               |
+| `swapAndTransferUniswapV3Token`            | Native / ERC20                       | Different ERC20 (`tokenIn`)               | `permit2.transferFrom` -> Swap          | **Yes**                | **Permit2** signature allowing LambdaPay to spend `tokenIn`                                   |
+| `swapAndTransferUniswapV3TokenPreApproved` | Native / ERC20                       | Different ERC20 (`tokenIn`)               | `tokenIn.transferFrom` -> Swap          | **Yes**                | Standard ERC20 `approve` allowing LambdaPay to spend `tokenIn`                                |
+| `subsidizedTransferToken`                  | ERC20                                | Same ERC20                                | `tokenIn.permit` + `transferFrom`       | No                     | **EIP-2612 `permit`** signature allowing LambdaPay to spend `tokenIn` (Submitted by Operator) |
 
 ---
 
@@ -217,9 +223,9 @@ If any condition is not met, the transaction will revert, preventing any state c
 - `ExpiredIntent`: `block.timestamp` is greater than `intent.deadline`.
 - `IntentAlreadyProcessed`: The combination of `intent.operator` and `intent.id` has already been used.
 - `InvalidOperator`: The `intent.operator` address is not registered.
-- `InsufficientBalance` / `TransferFailed`: Payer lacks sufficient funds or token transfer failed.
-- `SwapFailedString`: Uniswap V3 swap execution failed (e.g., insufficient liquidity, pool doesn't exist, deadline exceeded).
-- Permit2/ERC20 Approval Errors: Insufficient allowance or invalid signature.
+- `InsufficientBalance` / `TransferFailed`: Payer lacks sufficient funds, or token transfer failed.
+- `SwapFailed`: Uniswap V3 swap execution failed (e.g., insufficient liquidity, pool doesn't exist, router deadline exceeded). _(Note: Actual error name might vary slightly)_
+- Permit2/ERC20 Approval Errors: Insufficient allowance, invalid signature, or other approval-related issue.
 - `NonZeroValue`: `msg.value` was sent for a method not expecting native currency.
 - `ZeroValue`: `msg.value` was zero for a method expecting native currency input.
 - (See `ILambdaPay.sol` and `LambdaPay.sol` for a complete list of custom errors).
@@ -234,7 +240,7 @@ Before integrating LambdaPay, ensure the following components are deployed and a
 
 - **LambdaPay Contract:** The main contract itself.
 - **Uniswap Universal Router:** Required for swap functionalities.
-- **Permit2 Contract:** ([Address `0x000000000022D473030F116dDEE9F6B43aC78BA3`](https://etherscan.io/address/0x000000000022D473030F116dDEE9F6B43aC78BA3)) Required for gasless approval methods.
+- **Permit2 Contract:** ([Address `0x000000000022D473030F116dDEE9F6B43aC78BA3`](https://etherscan.io/address/0x000000000022D473030F116dDEE9F6B43aC78BA3)) Required for gasless approval methods (`transferToken`, `unwrapAndTransfer`, `swapAndTransferUniswapV3Token`).
 - **Wrapped Native Currency Contract:** (e.g., WETH) Required for swaps involving native currency.
 - **Operator Service:** A running instance of an Operator backend, registered with the deployed LambdaPay contract.
 
@@ -244,19 +250,19 @@ Before integrating LambdaPay, ensure the following components are deployed and a
 2.  **Select Payment Method:** Determine the correct `LambdaPay.sol` function to call based on `intent.recipientCurrency` and the token the payer chooses to pay with (refer to the [Contract Payment Methods](#contract-payment-methods-) table).
 3.  **Handle Approvals:**
     - **Permit2 Methods (`transferToken`, `unwrapAndTransfer`, `swapAndTransferUniswapV3Token`):**
-      - Prompt the payer to sign a Permit2 message (`PermitTransferFrom` or `PermitBatchTransferFrom`) granting the `LambdaPay` contract address allowance to spend the required input token amount. Libraries like `@uniswap/permit2-sdk` can help construct these messages.
+      - Prompt the payer to sign a Permit2 message (`PermitTransferFrom` or `PermitBatchTransferFrom`) granting the **`LambdaPay` contract address** allowance to spend the required amount of the payer's input token. Libraries like `@uniswap/permit2-sdk` can help construct these messages.
       - Pass the signed Permit2 data along with the `TransferIntent` to the chosen contract method.
     - **Pre-Approved Methods (`*PreApproved`):**
       - Check if the payer has already approved the `LambdaPay` contract to spend sufficient `tokenIn`.
-      - If not, prompt the payer to submit a standard ERC20 `approve` transaction.
+      - If not, prompt the payer to submit a standard ERC20 `approve` transaction targeting the `LambdaPay` contract address.
       - Call the chosen contract method with the `TransferIntent`.
     - **Native Input Methods (`transferNative`, `wrapAndTransfer`, `swapAndTransferUniswapV3Native`):**
       - Ensure the correct amount of native currency (`msg.value`) is sent with the transaction. No separate approval signature is needed.
     - **EIP-2612 Method (`subsidizedTransferToken`):**
       - Check if the `tokenIn` supports EIP-2612 `permit`.
-      - Prompt the payer to sign the EIP-2612 `permit` message for the `tokenIn`, granting allowance to the `LambdaPay` contract.
-      - Call the method with the `TransferIntent` and the `permit` signature data (`v`, `r`, `s`, `deadline`).
-4.  **Construct and Send Transaction:** Call the selected `LambdaPay.sol` function with the `TransferIntent`, necessary approval data (Permit2 or EIP-2612 signature), and `msg.value` if required.
+      - Prompt the payer to sign the EIP-2612 `permit` message for the `tokenIn`, granting allowance **to the `LambdaPay` contract**.
+      - _Typically_, this signature is sent to the Operator backend, which then constructs and submits the `subsidizedTransferToken` transaction including the `TransferIntent` and the `permit` signature data (`v`, `r`, `s`, `deadline`).
+4.  **Construct and Send Transaction:** Call the selected `LambdaPay.sol` function with the `TransferIntent`, necessary approval data (Permit2 signature), and `msg.value` if required. (For EIP-2612, this step is usually handled by the Operator).
 5.  **Handle Results:**
     - **Success:** Listen for the `Transferred` event on the blockchain for definitive confirmation. Update the UI accordingly.
     - **Failure:** Catch potential transaction reverts. Provide informative error messages to the user based on the revert reason.
@@ -331,6 +337,8 @@ FEE_DESTINATION=0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266 # Can be same or diff
 ETHERSCAN_API_KEY=YOUR_ETHERSCAN_API_KEY
 ```
 
+**Note:** Ensure the `UNISWAP_UNIVERSAL_ROUTER` and `WRAPPED_NATIVE` addresses are correct for the specific target network, as they differ between chains. Verify the current official addresses before deployment.
+
 ### Testing Locally
 
 Use Anvil (part of Foundry) to simulate deployment locally.
@@ -368,26 +376,26 @@ Use the `deploy.sh` script to deploy to live networks.
 
 ### Cross-chain Deployment
 
-To deploy the LambdaPay contract to multiple chains with the **same address**, you _must_ use the `--create2` deployment option.
+To deploy the LambdaPay contract to multiple chains with the **same address** using `CREATE2`, the deployment **must** use the same `salt`, the same deployer address, and result in the **exact same contract `init_code` hash** on all target chains. The `init_code` includes the contract bytecode **and** the ABI-encoded constructor arguments. Therefore, the values passed to the constructor (`_permit2`, `_universalRouter`, `_weth`) **must be identical across all chains** for the resulting `LambdaPay` contract address to be the same.
 
-1.  Ensure you have correctly configured `.env` files for each target chain (e.g., `.env.mainnet`, `.env.polygon`, `.env.optimism`).
-2.  Use the _same_ `PRIVATE_KEY` (deployer address) for all deployments.
-3.  The `CREATE2` deployment script uses a fixed salt combined with the deployer address and contract bytecode to generate the address. Ensure constructor parameters (`_permit2`, `_universalRouter`, `_weth`) match the correct addresses _on each respective chain_ within the deployment script if they differ. The _initial_ operator registration parameters (`_initialOperator`, `_feeDestination`) should ideally be consistent if you want the initial state identical, but the address generation _depends only on bytecode and salt_, not constructor _arguments_.
+**Important:** Since dependency addresses like the Uniswap Router or Wrapped Native token typically _differ_ between chains, directly deploying `LambdaPay.sol` using `CREATE2` with chain-specific constructor arguments will likely result in **different contract addresses** on each chain. Achieving the same address across chains usually requires deploying an immutable proxy contract (like EIP-1167 Minimal Proxy or a more complex proxy pattern) using `CREATE2`, where the proxy's `init_code` _can_ be made identical cross-chain, and then initializing the proxy to point to a chain-specific `LambdaPay` implementation deployment.
+
+If deploying directly (without a proxy) and accepting different addresses per chain:
 
 ```bash
 # Deploy to Ethereum Mainnet using CREATE2
 ./script/deploy.sh mainnet --create2 --verify
 
-# Deploy to Polygon using CREATE2 (will result in the same address as mainnet)
+# Deploy to Polygon using CREATE2 (will likely result in a *different* address than mainnet if constructor arguments differ)
 ./script/deploy.sh polygon --create2 --verify
 
-# Deploy to Optimism using CREATE2 (will result in the same address)
+# Deploy to Optimism using CREATE2 (will likely result in a *different* address)
 ./script/deploy.sh optimism --create2 --verify
 ```
 
 ### Contract Size Considerations
 
-The `LambdaPay.sol` contract may exceed the standard 24KB EVM contract size limit. The deployment scripts (`*.s.sol` and `deploy.sh`) are configured to handle this, potentially by using older transaction types or specific compiler settings if needed (though Foundry typically handles optimization well). Be aware of this during deployment and verification.
+The `LambdaPay.sol` contract may approach or exceed the standard 24KB EVM contract size limit. The deployment scripts (`*.s.sol` and `deploy.sh`) and Foundry's compiler optimizations aim to manage this. Be aware of potential size issues during deployment and verification, especially on chains with stricter limits or higher gas costs.
 
 ### Deployment Verification
 
@@ -396,7 +404,7 @@ After deployment:
 1.  **Address Confirmation:** Confirm the contract is deployed at the expected address (especially important for `CREATE2`).
 2.  **Constructor Arguments:** Verify on a block explorer that the constructor arguments (`permit2`, `universalRouter`, `weth`) were set correctly for the specific network.
 3.  **Initial State:** Check if the `initialOperator` and `feeDestination` were registered correctly if provided during deployment.
-4.  **Cross-chain Address:** For `CREATE2` deployments, verify the resulting contract address is identical across all deployed chains.
+4.  **Cross-chain Address:** For `CREATE2` deployments, verify the resulting contract address on each chain. Note that unless the `init_code` (bytecode + constructor args) was identical across all chains (which is unlikely due to differing dependency addresses), the addresses will differ.
 
 ---
 

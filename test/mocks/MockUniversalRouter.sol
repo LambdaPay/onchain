@@ -23,6 +23,9 @@ contract MockUniversalRouter {
     // Track if tokens were received to ensure mock behaves correctly
     bool public receivedTokens;
 
+    // Flag to control whether the router automatically sends tokens to recipients
+    bool public autoSend;
+
     // Uniswap V3 command constants
     uint8 constant UNWRAP_WETH = 0x02;
     uint8 constant TRANSFER = 0x07;
@@ -45,6 +48,13 @@ contract MockUniversalRouter {
     }
 
     /**
+     * @dev Set whether the router should automatically send tokens to recipients
+     */
+    function setAutoSend(bool _autoSend) external {
+        autoSend = _autoSend;
+    }
+
+    /**
      * @dev Simplified execution function that simulates swaps
      */
     function execute(bytes calldata commands, bytes[] calldata inputs, uint256 deadline) external payable {
@@ -58,7 +68,7 @@ contract MockUniversalRouter {
 
         if (
             commands.length >= 4 && uint8(commands[0]) == V3_SWAP_EXACT_OUT && uint8(commands[1]) == TRANSFER
-                && uint8(commands[2]) == TRANSFER
+                && uint8(commands[2]) == TRANSFER && autoSend
         ) {
             // Get token details from TRANSFER commands
             address feeTokenOut;
@@ -72,20 +82,13 @@ contract MockUniversalRouter {
             (recipientTokenOut, recipient, recipientAmount) = abi.decode(inputs[2], (address, address, uint256));
 
             // Transfer tokens directly to both destinations
-            // Mint tokens if needed (for tests)
             if (feeAmount > 0) {
-                uint256 balance = IERC20(feeTokenOut).balanceOf(address(this));
-                if (balance < feeAmount) {
-                    MockERC20(feeTokenOut).mint(address(this), feeAmount);
-                }
+                // Direct transfer from our balance
                 IERC20(feeTokenOut).transfer(feeDestination, feeAmount);
             }
 
             if (recipientAmount > 0) {
-                uint256 balance = IERC20(recipientTokenOut).balanceOf(address(this));
-                if (balance < recipientAmount) {
-                    MockERC20(recipientTokenOut).mint(address(this), recipientAmount);
-                }
+                // Direct transfer from our balance
                 IERC20(recipientTokenOut).transfer(recipient, recipientAmount);
             }
 
@@ -96,9 +99,17 @@ contract MockUniversalRouter {
                 (tokenIn, returnTo,) = abi.decode(inputs[3], (address, address, uint256));
 
                 // Return any unused input tokens
+                // For our test, assume we used exactly the input tokens needed
+                // This is a simplification for testing purposes
+                uint256 totalOut = feeAmount + recipientAmount;
+                uint256 rate = exchangeRates[tokenIn][feeTokenOut];
+                uint256 inputUsed = (totalOut * 1e18) / rate;
+
+                // Get current balance of tokenIn
                 uint256 balance = IERC20(tokenIn).balanceOf(address(this));
-                if (balance > 0) {
-                    IERC20(tokenIn).transfer(returnTo, balance);
+                // Keep only the amount we didn't use for the swap
+                if (balance > inputUsed) {
+                    IERC20(tokenIn).transfer(returnTo, balance - inputUsed);
                 }
             }
 
